@@ -1,4 +1,4 @@
-Flask
-requests
-oandapyV20
-gunicorn
+Flask==3.0.3
+requests==2.32.3
+oandapyV20==0.7.2
+gunicorn==22.0.0
