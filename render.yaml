@@ -1,7 +1,8 @@
 services:
   - type: web
-    name: oanda-bot
+    name: nass100-test
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn main:app
+    pythonVersion: "3.11"   # this also fixes any weird Python 3.13 issues
