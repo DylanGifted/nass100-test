@@ -30,22 +30,21 @@ app = Flask(__name__)
 
 def send_telegram(message):
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      data={"chat_id": CHAT_ID, "text": message}, timeout=10)
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": CHAT_ID, "text": message}, timeout=10)
     except:
         pass
 
-# Safe price fetch (never crashes)
+# Safe price (never crashes)
 def get_price():
     try:
         r = instruments.InstrumentsCandles(instrument=SYMBOL, params={"count": 1, "granularity": "M5"})
         api.request(r)
-        price = float(r.response["candles"][0]["mid"]["c"])
-        return round(price, 1)
+        return round(float(r.response["candles"][0]["mid"]["c"]), 1)
     except:
         return 20000.0
 
-# Get last 10 completed 15-min candles and detect FVG
+# Real 15-min FVG detection
 def detect_fvg():
     try:
         params = {"count": 10, "granularity": "M15", "price": "M"}
@@ -54,20 +53,11 @@ def detect_fvg():
         candles = [c for c in r.response["candles"] if c["complete"]]
         if len(candles) < 3:
             return None
-
-        c3 = candles[-3]  # 3 candles ago
-        c2 = candles[-2]
-        c1 = candles[-1]
-
-        high3 = float(c3["mid"]["h"])
-        low3  = float(c3["mid"]["l"])
-        high1 = float(c1["mid"]["h"])
-        low1  = float(c1["mid"]["l"])
-
-        # Bullish FVG: gap between low of c1 and high of c3
+        c3, c2, c1 = candles[-3], candles[-2], candles[-1]
+        high3, low3 = float(c3["mid"]["h"]), float(c3["mid"]["l"])
+        high1, low1 = float(c1["mid"]["h"]), float(c1["mid"]["l"])
         if low1 > high3:
             return {"type": "bullish", "zone_top": low1, "zone_bottom": high3}
-        # Bearish FVG: gap between high of c1 and low of c3
         if high1 < low3:
             return {"type": "bearish", "zone_top": low3, "zone_bottom": high1}
     except:
@@ -79,13 +69,9 @@ def place_trade(direction, fvg_zone=None):
     sl = round(entry - FVG_BUFFER if direction == "long" else entry + FVG_BUFFER, 1)
     tp = round(entry + FVG_BUFFER*2 if direction == "long" else entry - FVG_BUFFER*2, 1)
     units = POSITION_SIZE if direction == "long" else -POSITION_SIZE
-
     data = {"order": {
-        "instrument": SYMBOL,
-        "units": str(units),
-        "type": "MARKET",
-        "timeInForce": "FOK",
-        "stopLossOnFill": {"price": str(sl)},
+        "instrument": SYMBOL, "units": str(units), "type": "MARKET",
+        "timeInForce": "FOK", "stopLossOnFill": {"price": str(sl)},
         "takeProfitOnFill": {"price": str(tp)}
     }}
     r = orders.OrderCreate(OANDA_ACCOUNT_ID, data=data)
@@ -104,14 +90,12 @@ def close_positions():
         api.request(r)
         for pos in r.response['account']['positions']:
             if pos['instrument'] == SYMBOL:
-                units = pos['long']['units']
-                short = pos['short']['units']
-                total = float(units) + float(short)
+                total = float(pos['long']['units']) + float(pos['short']['units'])
                 if abs(total) > 0:
-                    close_units = int(-total)
-                    data = {"order": {"instrument": SYMBOL, "units": str(close_units), "type": "MARKET"}}
+                    units = int(-total)
+                    data = {"order": {"instrument": SYMBOL, "units": str(units), "type": "MARKET"}}
                     orders.OrderCreate(OANDA_ACCOUNT_ID, data=data).request(api)
-                    send_telegram(f"Position closed at {datetime.datetime.now().strftime('%H:%M')}")
+                    send_telegram("Position closed at " + datetime.datetime.now().strftime("%H:%M"))
     except:
         pass
 
@@ -120,35 +104,30 @@ def daily_strategy():
     while True:
         now = datetime.datetime.now()
         t = now.strftime("%H:%M")
-
-        # Daily reset
         if now.hour == 0 and now.minute < 5:
             already_traded_today = False
             send_telegram("New day – FVG bot ready")
-
-        # Entry window
         if ENTRY_START <= t <= ENTRY_END and not already_traded_today:
-            send_telegram("Scanning for FVG in 14:30–15:00 window...")
+            send_telegram("Scanning for FVG 14:30–15:00...")
             fvg = detect_fvg()
             if fvg:
                 direction = "long" if fvg["type"] == "bullish" else "short"
                 place_trade(direction, fvg)
                 already_traded_today = True
             else:
-                send_telegram("No valid FVG found – skipping today")
-
-        # Force exit
+                send_telegram("No valid FVG – skipping today")
         if t == EXIT_TIME:
             close_positions()
-
         time.sleep(20)
 
 @app.route("/")
 def home():
-    return "OANDA FVG Bot v2 – Running & Scanning 15min FVGs!"
+    return "Dylan's NAS100 FVG Bot v2 – ALIVE & HUNTING FVGs 24/7"
 
 if __name__ == "__main__":
+    # These two messages fire EVERY SINGLE TIME the bot wakes up
     send_telegram("OANDA FVG BOT v2 STARTED – Real 15min FVG Detection Active!")
+    send_telegram("DYLAN'S BOT IS FULLY AWAKE AND WILL NEVER SLEEP AGAIN")
     Thread(target=daily_strategy, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
