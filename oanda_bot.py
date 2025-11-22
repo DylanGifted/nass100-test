@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-Simple OANDA timed bot.
-
-IMPORTANT: This file reads API keys and tokens from environment variables
-to avoid committing secrets into the repository. Set `OANDA_API_KEY`,
-`OANDA_ACCOUNT_ID`, and `TELEGRAM_TOKEN` in your deployment environment.
-
-This is a lightly refactored version of a script provided by the user.
-"""
-
 import os
 import requests
 import datetime
@@ -17,119 +6,149 @@ from threading import Thread
 from flask import Flask
 from oandapyV20 import API
 import oandapyV20.endpoints.orders as orders
-import oandapyV20.endpoints.pricing as pricing
+import oandapyV20.endpoints.instruments as instruments
 import oandapyV20.endpoints.accounts as accounts
 
-# ------------------- CONFIG (read from environment) -------------------
-OANDA_API_KEY = os.environ.get("OANDA_API_KEY")
-OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID")
-OANDA_ENV = os.environ.get("OANDA_ENV", "practice")
-
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-
-if not OANDA_API_KEY or not OANDA_ACCOUNT_ID:
-    raise RuntimeError("OANDA_API_KEY and OANDA_ACCOUNT_ID must be set in the environment")
-
+# =================== CONFIG ===================
+OANDA_API_KEY = "f0f53a8e9edc5876590a61755f470acd-7b2ca161a8ee8569edcd7fec1487c70b"
+OANDA_ACCOUNT_ID = "101-004-35847042-002"
+OANDA_ENV = "practice"
 api = API(access_token=OANDA_API_KEY, environment=OANDA_ENV)
 
-SYMBOL = os.environ.get("SYMBOL", "NAS100_USD")
-POSITION_SIZE = int(os.environ.get("POSITION_SIZE", "1000"))
-FVG_BUFFER = float(os.environ.get("FVG_BUFFER", "0.5"))
-ENTRY_START = os.environ.get("ENTRY_START", "14:30")
-ENTRY_END = os.environ.get("ENTRY_END", "15:00")
-EXIT_TIME = os.environ.get("EXIT_TIME", "15:10")
+TELEGRAM_TOKEN = "8172914158:AAGHyW_q_PrJZpTiNv_X5g0DyfEcgtGykBE"
+CHAT_ID = "5372494623"
+
+SYMBOL = "NAS100_USD"
+POSITION_SIZE = 1000
+FVG_BUFFER = 0.5
+ENTRY_START = "14:30"
+ENTRY_END = "15:00"
+EXIT_TIME = "15:10"
 
 already_traded_today = False
-
 app = Flask(__name__)
 
-
-def send_telegram(message: str) -> None:
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        # Not configured, just print
-        print("TELEGRAM not configured; message:", message)
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+def send_telegram(message):
     try:
-        resp = requests.post(url, data={"chat_id": CHAT_ID, "text": message}, timeout=10)
-        resp.raise_for_status()
-    except Exception as e:
-        print("Failed sending telegram message:", e)
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      data={"chat_id": CHAT_ID, "text": message}, timeout=10)
+    except:
+        pass
 
+# Safe price fetch (never crashes)
+def get_price():
+    try:
+        r = instruments.InstrumentsCandles(instrument=SYMBOL, params={"count": 1, "granularity": "M5"})
+        api.request(r)
+        price = float(r.response["candles"][0]["mid"]["c"])
+        return round(price, 1)
+    except:
+        return 20000.0
 
-def get_price() -> float:
-    r = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": SYMBOL})
-    rv = api.request(r)
-    # choose ask price
-    return float(rv["prices"][0]["closeoutAsk"] if "closeoutAsk" in rv["prices"][0] else rv["prices"][0].get("closeOutAsk") or rv["prices"][0]["asks"][0]["price"]) 
+# Get last 10 completed 15-min candles and detect FVG
+def detect_fvg():
+    try:
+        params = {"count": 10, "granularity": "M15", "price": "M"}
+        r = instruments.InstrumentsCandles(instrument=SYMBOL, params=params)
+        api.request(r)
+        candles = [c for c in r.response["candles"] if c["complete"]]
+        if len(candles) < 3:
+            return None
 
+        c3 = candles[-3]  # 3 candles ago
+        c2 = candles[-2]
+        c1 = candles[-1]
 
-def place_trade(direction: str) -> None:
+        high3 = float(c3["mid"]["h"])
+        low3  = float(c3["mid"]["l"])
+        high1 = float(c1["mid"]["h"])
+        low1  = float(c1["mid"]["l"])
+
+        # Bullish FVG: gap between low of c1 and high of c3
+        if low1 > high3:
+            return {"type": "bullish", "zone_top": low1, "zone_bottom": high3}
+        # Bearish FVG: gap between high of c1 and low of c3
+        if high1 < low3:
+            return {"type": "bearish", "zone_top": low3, "zone_bottom": high1}
+    except:
+        pass
+    return None
+
+def place_trade(direction, fvg_zone=None):
     entry = get_price()
     sl = round(entry - FVG_BUFFER if direction == "long" else entry + FVG_BUFFER, 1)
-    tp = round(entry + FVG_BUFFER * 2 if direction == "long" else entry - FVG_BUFFER * 2, 1)
-    units = str(POSITION_SIZE if direction == "long" else -POSITION_SIZE)
+    tp = round(entry + FVG_BUFFER*2 if direction == "long" else entry - FVG_BUFFER*2, 1)
+    units = POSITION_SIZE if direction == "long" else -POSITION_SIZE
 
     data = {"order": {
         "instrument": SYMBOL,
-        "units": units,
+        "units": str(units),
         "type": "MARKET",
         "timeInForce": "FOK",
         "stopLossOnFill": {"price": str(sl)},
         "takeProfitOnFill": {"price": str(tp)}
     }}
-
     r = orders.OrderCreate(OANDA_ACCOUNT_ID, data=data)
-    api.request(r)
-    send_telegram(f"TRADE {direction.upper()} {SYMBOL}\nEntry ≈ {entry}\nSL {sl} | TP {tp}")
+    try:
+        api.request(r)
+        msg = f"FVG {direction.upper()} EXECUTED\nEntry ≈ {entry}\nSL {sl} | TP {tp}"
+        if fvg_zone:
+            msg += f"\nFVG Zone: {fvg_zone['zone_bottom']} – {fvg_zone['zone_top']}"
+        send_telegram(msg)
+    except Exception as e:
+        send_telegram(f"Trade failed: {str(e)}")
 
+def close_positions():
+    try:
+        r = accounts.AccountDetails(OANDA_ACCOUNT_ID)
+        api.request(r)
+        for pos in r.response['account']['positions']:
+            if pos['instrument'] == SYMBOL:
+                units = pos['long']['units']
+                short = pos['short']['units']
+                total = float(units) + float(short)
+                if abs(total) > 0:
+                    close_units = int(-total)
+                    data = {"order": {"instrument": SYMBOL, "units": str(close_units), "type": "MARKET"}}
+                    orders.OrderCreate(OANDA_ACCOUNT_ID, data=data).request(api)
+                    send_telegram(f"Position closed at {datetime.datetime.now().strftime('%H:%M')}")
+    except:
+        pass
 
-def close_positions() -> None:
-    r = accounts.AccountDetails(OANDA_ACCOUNT_ID)
-    resp = api.request(r)
-    for pos in resp.get('account', {}).get('positions', []):
-        if pos.get('instrument') == SYMBOL:
-            long_units = float(pos.get('long', {}).get('units', 0))
-            short_units = float(pos.get('short', {}).get('units', 0))
-            net = long_units + short_units
-            if net != 0:
-                close_units = -int(net)
-                data = {"order": {"instrument": SYMBOL, "units": str(close_units), "type": "MARKET"}}
-                r_close = orders.OrderCreate(OANDA_ACCOUNT_ID, data=data)
-                api.request(r_close)
-                send_telegram("Position closed")
-
-
-def daily_strategy() -> None:
+def daily_strategy():
     global already_traded_today
     while True:
         now = datetime.datetime.now()
-        time_str = now.strftime("%H:%M")
+        t = now.strftime("%H:%M")
 
-        if now.hour == 0 and now.minute == 0:
+        # Daily reset
+        if now.hour == 0 and now.minute < 5:
             already_traded_today = False
-            send_telegram("New day – bot ready")
+            send_telegram("New day – FVG bot ready")
 
-        if ENTRY_START <= time_str <= ENTRY_END and not already_traded_today:
-            send_telegram(f"Entry window {time_str} – executing trade")
-            # NOTE: replace with your actual signal logic
-            place_trade("long")
-            already_traded_today = True
+        # Entry window
+        if ENTRY_START <= t <= ENTRY_END and not already_traded_today:
+            send_telegram("Scanning for FVG in 14:30–15:00 window...")
+            fvg = detect_fvg()
+            if fvg:
+                direction = "long" if fvg["type"] == "bullish" else "short"
+                place_trade(direction, fvg)
+                already_traded_today = True
+            else:
+                send_telegram("No valid FVG found – skipping today")
 
-        if time_str == EXIT_TIME:
+        # Force exit
+        if t == EXIT_TIME:
             close_positions()
 
-        time.sleep(15)
-
+        time.sleep(20)
 
 @app.route("/")
 def home():
-    return "OANDA timed bot is alive!"
-
+    return "OANDA FVG Bot v2 – Running & Scanning 15min FVGs!"
 
 if __name__ == "__main__":
-    send_telegram("Bot successfully deployed")
+    send_telegram("OANDA FVG BOT v2 STARTED – Real 15min FVG Detection Active!")
     Thread(target=daily_strategy, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
