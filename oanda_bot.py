@@ -152,4 +152,12 @@ def log():
 if __name__ == "__main__":
     Thread(target=daily_strategy, daemon=True).start()
     log_and_notify("BOT FULLY RUNNING – 200 units | Waiting for 14:30")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))  
+    log_and_notify("LOG TEST – Bot is 100% alive right now")
+log_and_notify(f"Current time: {datetime.datetime.now().strftime('%H:%M:%S')}")
+log_and_notify(f"Position size set to: {POSITION_SIZE} units")
+log_and_notify("You will see EVERYTHING here from now on – refresh /log")
+log_and_notify("LOG TEST – Bot is 100% alive right now")
+log_and_notify(f"Current time: {datetime.datetime.now().strftime('%H:%M:%S')}")
+log_and_notify(f"Position size set to: {POSITION_SIZE} units")
+log_and_notify("You will see EVERYTHING here from now on – refresh /log")
